@@ -550,14 +550,57 @@ El desafío consiste en obtener información sensible de ubicación (geolocaliza
 
 ### Enfoque de explotación
 
-1. Iniciar sesión y capturar con Burp la petición legítima que consulta la ubicación del propio vehículo, identificando el microservicio y el formato de la petición.
-2. Obtener el VIN de otro usuario, por ejemplo a través de la funcionalidad de foro/comunidad de crAPI, donde suelen compartirse datos de vehículos entre usuarios.
-3. Reemplazar el VIN propio por el de la víctima en la petición interceptada.
-4. Reenviar la petición modificada y confirmar que la respuesta contiene la ubicación del vehículo ajeno.
+> El entorno de crAPI se levanta siguiendo lo detallado en el [Práctico 1 (Paso 6)](https://github.com/belenkanas/dsws-practico1): se descarga el proyecto oficial de OWASP, se ejecuta `sudo docker-compose -f docker-compose.yml --compatibility up -d` parado en `~/crAPI-main/deploy/docker`, se verifica que todos los servicios estén en estado `Up` con `sudo docker-compose ps`, y se accede a la aplicación desde `http://localhost:8888`. crAPI también expone un servidor de correo de prueba (MailHog) en `http://localhost:8025`, necesario para completar el registro y la verificación de vehículos, ya que la aplicación no envía correos reales sino que los captura ahí.
+
+1. Registrarse e iniciar sesión en crAPI (`http://localhost:8888`). Desde el *Dashboard*, seleccionar **Add a Vehicle** y completar el alta con el VIN y el PIN recibidos en MailHog (`http://localhost:8025`) tras el registro.
+
+Para este caso, los datos obtenidos fueron:
+
+```bash
+Pincode: 0416
+VIN: A443EP1392B76L52P
+```
+
+![Mail recibido](images/image23.png)
+
+![Vehiculo agregado](images/image24.png)
+
+2. Una vez agregado el vehículo, el *Dashboard* muestra su información junto con un botón **Refresh Location**.
+
+  ![Info del auto](images/image25.png)
+
+ Interceptar con Burp la petición que dispara dicho botón, para identificar el endpoint y el formato exacto de la petición: `GET /identity/api/v2/vehicle/<vehicleid>/location`, donde `<vehicleid>` es un UUID (no un número secuencial). Enviar esta petición a Repeater.
+
+ ![HTTP Request](images/image26.png)
+ 
+3. Obtener el `vehicleid` de otro usuario. Para esto, crAPI expone en la sección **Community** de la aplicación un foro donde los usuarios publican mensajes; el endpoint que alimenta esa sección, confirmado en el historial de Burp al navegar por dicha sección, es `GET /community/api/v2/community/posts/recent?limit=30&offset=0`, que devuelve, junto con cada publicación,  un objeto `author` con datos del usuario que la escribió, entre ellos su `vehicleid`. Se interceptan estas respuestas con Burp y se anota el `vehicleid` de algún otro usuario.
+
+  ![Request y response](images/image27.png)
+
+  En este caso, se usó la información del primer comentario del foro:
+
+  ```json
+  "author":{
+    "nickname":"Robot",
+    "email":"robot001@example.com","vehicleid":"4bae9968-ec7f-4de3-a3a0-ba1b2ab5e5e5","profile_pic_url":"","created_at":"2026-08-14T14:57:28.153Z"
+  },
+  ```
+
+4. En Repeater, sobre la petición del paso 2, reemplazar el propio `<vehicleid>` en la URL por el UUID de la víctima obtenido en el paso anterior.
+
+  La petición queda entonces: 
+  
+  `GET /identity/api/v2/vehicle/4bae9968-ec7f-4de3-a3a0-ba1b2ab5e5e5/location`
+
+
+5. Reenviar la petición modificada y verificar en la respuesta (`200 OK`) que se obtienen las coordenadas (`latitude`/`longitude`) del vehículo ajeno, junto con datos adicionales del propietario (`fullName`, `email`), confirmando así el acceso no autorizado a información de otro usuario.
+
+  ![Respuesta](images/image28.png)
+
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+Esta vulnerabilidad comparte la misma causa raíz que J6 (View Basket) en Juice Shop: en ambos casos el backend identifica un recurso mediante un identificador provisto por el propio cliente en la URL, sin verificar del lado servidor que ese recurso pertenezca al usuario autenticado que hace la petición; la diferencia es únicamente de contexto (una cesta de compras en Juice Shop, la ubicación de un vehículo en crAPI) y de que acá se usa un UUID en lugar de un ID numérico secuencial, lo cual complica un poco la enumeración pero no soluciona el problema de fondo. Por eso, la corrección es análoga: el endpoint `GET /identity/api/v2/vehicle/<vehicleid>/location` debería validar, antes de devolver la ubicación, que el `vehicleid` recibido esté asociado al usuario autenticado según su token, devolviendo un error de autorización (`403 Forbidden`) en caso contrario, en lugar de confiar únicamente en el UUID recibido en la ruta. Adicionalmente, conviene revisar el endpoint `GET /community/api/v2/community/posts/recent`, ya que constituye en sí mismo una exposición excesiva de datos (*excessive data exposure*): no debería incluir el `vehicleid` de los usuarios en la respuesta de un foro público, dado que esa información no es necesaria para la funcionalidad de comentarios y es precisamente la que permite identificar víctimas para explotar la falla de autorización.
 
 ---
 </div>
@@ -688,4 +731,4 @@ Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incl
 ---
 </div>
 
-> Belén Kanas | Desarrollo de Software Seguro 2026
+> Belén Kanas | Práctico 3 - OWASP Juice Shop y OWASP crAPI | Desarrollo de Software Seguro 2026
