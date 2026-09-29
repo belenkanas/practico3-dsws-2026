@@ -317,6 +317,7 @@ El desafío consiste en recuperar el listado completo de credenciales (usuarios 
 }
 
 ```
+
 ### Recomendaciones
 
 La corrección de esta vulnerabilidad pasa fundamentalmente por reemplazar la construcción de la consulta de búsqueda por consultas parametrizadas, de forma que el valor ingresado en el parámetro `q` sea tratado siempre como un dato y nunca como parte de la sentencia SQL, evitando así que pueda alterar la estructura de la consulta o agregar cláusulas como `UNION SELECT`. Además, conviene validar del lado servidor el formato esperado del término de búsqueda antes de utilizarlo, y evitar exponer en las respuestas de error los detalles internos de la base de datos (como el nombre de las tablas, la cantidad de columnas o el texto completo de la sentencia SQL fallida), ya que esa información es justamente la que permitió inferir la estructura de la consulta y construir el payload de inyección. Por último, dado que en este caso la inyección permitió acceder a contraseñas almacenadas, se recomienda también asegurar que dichas contraseñas se guarden utilizando funciones de hashing robustas y con *salt* (evitando algoritmos débiles como MD5 sin salt), de modo que aun ante una fuga de este tipo el impacto sobre las cuentas de los usuarios se vea reducido.
@@ -336,18 +337,83 @@ El desafío consiste en visualizar el contenido de la cesta de compras de un usu
 
 ### Clasificación OWASP Top 10 Web
 
-**A01:2021 – Broken Access Control**, en su variante de IDOR (*Insecure Direct Object Reference*).
+**A01:2021 – Broken Access Control**, en su variante de IDOR (*Insecure Direct Object Reference*). A diferencia de J4 (donde el problema es que el servidor acepta un campo `role` que el cliente no debería poder fijar) y de J7 (donde el problema es que un recurso oculto del catálogo sigue siendo accesible vía API), en este caso el defecto es que el endpoint de la cesta identifica el recurso únicamente mediante un identificador numérico secuencial provisto en la URL, sin verificar del lado servidor que dicho identificador pertenezca al usuario autenticado que hace la petición. Es, por lo tanto, un caso más directo de IDOR: cualquier usuario autenticado puede acceder a un recurso ajeno con solo cambiar un número.
 
 ### Enfoque de explotación
 
-1. Iniciar sesión con una cuenta propia, agregar al menos un producto a la cesta e identificar el patrón del endpoint correspondiente (`GET /rest/basket/{id}`).
-2. Interceptar dicha petición con Burp.
-3. Modificar manualmente el valor `{id}` por otro identificador numérico, correspondiente a la cesta de otro usuario.
-4. Reenviar la petición modificada y verificar que la respuesta contiene los productos de una cesta que no pertenece al usuario autenticado.
+1. Iniciar sesión con una cuenta propia y agregar al menos un producto a la cesta desde la interfaz, para poder identificar en Burp el patrón del endpoint correspondiente (`GET /rest/basket/{id}`). En este caso el producto agregado fue `Apple Juice (1000ml)`.
+
+para esta prueba se registró un nuevo usuario, aunque no es un requisito, el desafío puede reproducirse igualmente con cualquier cuenta ya existente.
+
+```json
+{
+  "email": "user@basket.juiceshop",
+  "password": "prueba1234"
+}
+```
+
+![Producto agregado](images/image12.png)
+
+2. Ubicar en el historial de Burp la petición `GET /rest/basket/{id}` que se generó al cargar la propia cesta (en este caso, con `{id}` igual a `6`, correspondiente a la cesta del usuario recién creado) y enviarla a **Repeater** (clic derecho → *Send to Repeater*) para poder modificarla.
+
+   ![HTTP Request](images/image13.png)
+
+3. En Repeater, modificar manualmente el valor `{id}` de la URL por otro identificador numérico, correspondiente a la cesta de otro usuario. En este caso se probó con `{id}` igual a `1`, es decir, la cesta del primer usuario registrado en la aplicación.
+
+4. Reenviar la petición modificada y verificar que la respuesta (`200 OK`) contiene los productos de una cesta que no pertenece al usuario autenticado. En este caso, productos que el usuario de prueba nunca agregó a su propia cesta (`Orange Juice (1000ml)` y `Eggfruit Juice (500ml)`).
+
+   ![Response](images/image14.png)
+
+  Respuesta obtenida (fragmento relevante):
+
+   ```json
+   {
+     "id":2,
+     "name":"Orange Juice (1000ml)",
+     "description":"Made from oranges hand-picked by Uncle Dittmeyer.",
+     "price":2.99,
+     "deluxePrice":2.49,
+     "image":"orange_juice.jpg",
+     "createdAt":"2026-09-29T17:01:24.198Z",
+     "updatedAt":"2026-09-29T17:01:24.198Z",
+     "deletedAt":null,
+     "BasketItem":{
+       "ProductId":2,
+       "BasketId":1,
+       "id":2,
+       "quantity":3,
+       "createdAt":"2026-09-29T17:01:25.118Z",
+       "updatedAt":"2026-09-29T17:01:25.118Z"
+     }
+   },
+   {
+     "id":3,
+     "name":"Eggfruit Juice (500ml)",
+     "description":"Now with even more exotic flavour.",
+     "price":8.99,
+     "deluxePrice":8.99,
+     "image":"eggfruit_juice.jpg",
+     "createdAt":"2026-09-29T17:01:24.198Z",
+     "updatedAt":"2026-09-29T17:01:24.198Z",
+     "deletedAt":null,
+     "BasketItem":{
+       "ProductId":3,
+       "BasketId":1,
+       "id":3,
+       "quantity":1,
+       "createdAt":"2026-09-29T17:01:25.118Z",
+       "updatedAt":"2026-09-29T17:01:25.118Z"
+     }
+   }
+   ```
+
+   La propia aplicación confirma la resolución del desafío mostrando el cartel de éxito correspondiente a "View Basket":
+
+   ![Mensaje de éxito](images/image15.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de esta vulnerabilidad requiere agregar, en el endpoint `GET /rest/basket/{id}`, una verificación del lado servidor que confirme que el `id` de la cesta solicitada pertenece efectivamente al usuario autenticado según su token de sesión, devolviendo un error de autorización (por ejemplo `403 Forbidden`) en caso contrario, en lugar de confiar únicamente en el identificador recibido en la URL. Como medida adicional de defensa en profundidad, conviene evitar exponer identificadores internos secuenciales y fácilmente adivinables en las rutas de la API, reemplazándolos por identificadores no predecibles (como UUID) o resolviendo la cesta del usuario a partir de su sesión en vez de requerir un `id` explícito en la petición, de forma que un atacante no pueda enumerar recursos ajenos simplemente incrementando o decrementando un número.
 
 ---
 </div>
