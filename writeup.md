@@ -125,22 +125,34 @@ Una vez levantado el contenedor correspondiente a OWASP Juice Shop (con el coman
 
 1. Interceptar con BurpSuite la petición `POST /rest/user/login` que dispara el formulario de inicio de sesión.
 
-Una vez ingresado en JuiceShop, intentar hacer login con una cuenta arbiraria, esto dispará un HTTP Request al proxy de intercepción.
+Una vez ingresado en Juice Shop, se intenta iniciar sesión con una cuenta arbitraria (por ejemplo `admin@juice.shop` / `hola`), lo cual dispara la petición HTTP correspondiente hacia el proxy de intercepción.
 
 ![Login de JuiceShop](images/image1.png)
 
-Desde Burpsuite, se selecciona dicho request para modificarlo (Click Derecho --> Send to Repeater):
+Desde Burp, en la pestaña **Proxy > HTTP history**, se identifica dicha petición (`POST /rest/user/login`, con código de respuesta `401 Unauthorized`) y se la envía a **Repeater** para poder modificarla y reenviarla a demanda (clic derecho sobre la petición --> *Send to Repeater*):
+
 ![HTTPRequest en Burpsuite](images/image2.png)
 
-2. En Repeater, en el campo `email` del Request, insertar un payload de inyección SQL que fuerce la condición a verdadera y comente el resto de la sentencia, utilizando la condición solicitada en la consigna (`' or 22=22--`).
-3. Dejar el campo `password` con un valor arbitrario, dado que la parte de la consulta que lo evalúa quedará neutralizada por el comentario SQL.
-4. Reenviar la petición y verificar que la respuesta contiene un token de sesión válido asociado a la cuenta de administrador (`admin@juice-sh.op`), dado que suele ser el primer registro de la tabla de usuarios.
+2. En Repeater, en el campo `email` del cuerpo de la petición, reemplazar el valor por un payload de inyección SQL que cierre la cadena original, fuerce una condición verdadera y comente el resto de la sentencia, utilizando la condición solicitada en la consigna:
+
+```json
+   {
+     "email":"' or 22=22--",
+     "password":"hola"
+   }
+```
+
+De esta forma, la consulta que el backend ejecuta contra la base de datos (aproximadamente `SELECT * FROM Users WHERE email = '' or 22=22-- ' AND password = '...'`) queda con una condición `WHERE` que siempre es verdadera, ya que `22=22` se evalúa como verdadero para todas las filas de la tabla `Users`.
+
+3. Dejar el campo `password` con un valor arbitrario (por ejemplo `hola`), dado que el operador `--` comenta el resto de la sentencia SQL —incluida la comparación de la contraseña—, por lo que su valor deja de ser evaluado por la base de datos.
+
+4. Reenviar la petición y verificar en la respuesta que, en lugar del `401 Unauthorized` original, se obtiene un `200 OK` con un cuerpo JSON que incluye un token de sesión (JWT) y los datos del usuario devuelto por la consulta. Dado que la condición `or 22=22` es verdadera para todas las filas, la base de datos devuelve el primer registro de la tabla `Users`, que corresponde a la cuenta de administrador (`admin@juice-sh.op`), quedando así autenticado como dicho usuario sin conocer su contraseña real.
 
 ![Vulnerabilidad explotada](images/image3.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección principal de esta vulnerabilidad consiste en reemplazar la construcción de la consulta de login por consultas parametrizadas (*prepared statements*), o utilizar un ORM que las implemente internamente, de modo que los valores ingresados en los campos `email` y `password` se traten siempre como datos y nunca como parte ejecutable de la sentencia SQL, eliminando así la posibilidad de inyección. A esto conviene sumar una validación del formato del correo electrónico del lado servidor antes de usarlo en cualquier consulta, y un manejo de errores genérico en el login que no exponga mensajes internos de la base de datos capaces de facilitar a un atacante el ajuste de su payload. Por último, también es recomendable aplicar el principio de mínimo privilegio en la cuenta de base de datos que usa la aplicación e incorporar controles automatizados de seguridad (SAST/DAST) en el pipeline de CI/CD.
 
 ---
 </div>
@@ -162,13 +174,33 @@ El desafío consiste en registrar un nuevo usuario, llamado "ernesto" según la 
 ### Enfoque de explotación
 
 1. Interceptar con Burp la petición `POST /api/Users` que dispara el formulario público de registro.
-2. Completar los campos obligatorios del registro, utilizando `ernesto` como nombre de usuario, tal como exige la consigna.
-3. Agregar manualmente al cuerpo JSON de la petición un campo adicional `"role": "admin"`, que no está expuesto en el formulario visible.
-4. Reenviar la petición y confirmar el privilegio obtenido iniciando sesión con las credenciales recién creadas y verificando el acceso a funcionalidades exclusivas de administrador.
+
+    Cabe aclarar que el formulario de registro de Juice Shop no solicita un nombre de usuario por separado, sino únicamente correo electrónico, contraseña, pregunta de seguridad y su respuesta. Por ese motivo, el nombre "ernesto" exigido por la consigna se incorporó como parte del correo electrónico utilizado para el registro (`ernesto@admin.juiceshop`).
+
+![Registro de usuario](images/image4.png)
+
+2. Completar los campos obligatorios del registro con dicho correo y una contraseña arbitraria, y enviar el formulario. Esto dispara la petición `POST /api/Users` correspondiente, visible en el historial de Burp.
+
+![HTTP Request](images/image5.png)
+
+    En este punto, la petición ya se completó exitosamente en su forma original (respuesta `201 Created`), pero el usuario creado tiene el rol por defecto (`customer`), no el de administrador.
+
+
+3. Enviar la petición a **Repeater** (igual que en el desafío anterior) y agregar manualmente al cuerpo JSON un campo adicional `"role": "admin"`, que no está expuesto en el formulario visible del frontend.
+
+    Dado que el correo `ernesto@admin.juiceshop` ya había sido registrado en el paso anterior, fue necesario modificarlo levemente (`ernesto@admin1.juiceshop`) para evitar el conflicto de unicidad y poder probar la inyección del campo `role` en un registro nuevo.
+
+![Peticion modificada](images/image6.png)
+
+4. Reenviar la petición desde Repeater y verificar en la respuesta que el usuario fue creado con `"role":"admin"` (en lugar del valor por defecto `customer`). Finalmente, se confirma el privilegio obtenido iniciando sesión en Juice Shop con dichas credenciales: la aplicación reconoce el desafío como resuelto, mostrando el cartel de confirmación correspondiente a "Admin Registration".
+
+![Verificacion](images/image7.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+Para corregir esta vulnerabilidad se recomienda que el backend defina de forma explícita, mediante un DTO o esquema de validación, el conjunto de campos que un cliente no autenticado puede enviar al crear un usuario, descartando o ignorando cualquier campo adicional como `role` en lugar de persistirlo tal cual llega en el cuerpo de la petición; de este modo, el rol de un usuario nuevo debería asignarse siempre del lado servidor con un valor por defecto seguro (por ejemplo `customer`), sin que el cliente tenga forma de sobrescribirlo.
+
+Adicionalmente, la asignación o modificación de un rol con privilegios elevados como `admin` debería quedar restringida a una funcionalidad separada, accesible únicamente por usuarios ya autenticados como administradores, y quedar registrada en un log de auditoría para poder detectar intentos de escalamiento de privilegios como el descripto en este desafío.
 
 ---
 </div>
@@ -189,14 +221,105 @@ El desafío consiste en recuperar el listado completo de credenciales (usuarios 
 
 ### Enfoque de explotación
 
-1. Determinar, mediante prueba y error con cláusulas `ORDER BY`, la cantidad de columnas que devuelve la consulta original de búsqueda de productos.
-2. Construir un payload que agregue una cláusula `UNION SELECT` apuntando a la tabla de usuarios en lugar de a la de productos, alineando el tipo y la cantidad de columnas.
-3. Enviar dicho payload desde el campo de búsqueda de productos, o directamente interceptando y modificando la petición `GET /rest/products/search`.
-4. Inspeccionar la respuesta JSON devuelta para extraer los pares de correo electrónico y hash de contraseña de los usuarios registrados.
+### Enfoque de explotación
 
+1. Realizar una búsqueda normal de un producto (por ejemplo `apple`) desde la interfaz de Juice Shop, para identificar en Burp la petición correspondiente al buscador: `GET /rest/products/search?q=apple`.
+
+   ![Búsqueda normal de productos](images/image8.png)
+
+   Esta petición se envía a **Repeater**, ya que sobre ella se van a probar sucesivos payloads de forma manual.
+
+2. Determinar, mediante prueba y error con cláusulas `ORDER BY`, la cantidad de columnas que devuelve la consulta original de búsqueda de productos. Para esto, en el parámetro `q` se prueba cerrar la condición `LIKE` y los paréntesis que arma el backend, seguido de un `ORDER BY` con un número de columna creciente (`ORDER BY 1`, `ORDER BY 2`, etc.):
+`q=x')) ORDER BY 1--`
+    
+    Dado que el valor de `q` contiene espacios, y una petición HTTP cruda no admite espacios sin codificar en la línea de la URL, es necesario codificarlos antes de enviar la petición. En Burp esto se hace seleccionando el texto del payload dentro del Repeater y usando el atajo `Ctrl+U` (*URL-encode*), que reemplaza automáticamente los espacios y demás caracteres especiales por su forma codificada (por ejemplo, el espacio pasa a `+`).
+
+![Payload ORDER BY 1 codificado y funcionando](images/image9.png)
+
+    Se repite el envío incrementando el número del `ORDER BY` en cada intento. Mientras la cantidad de columna indicada exista, la respuesta sigue siendo `200 OK`. Al llegar a `ORDER BY 10`, el servidor responde con un error `500 Internal Server Error`, indicando explícitamente que el número de columna está fuera de rango y que el valor debe estar entre 1 y 9. Esto confirma que la consulta original de búsqueda de productos tiene **9 columnas**.
+
+![Error al superar la cantidad real de columnas (ORDER BY 10)](images/image10.png)
+
+3. Con la cantidad de columnas ya conocida, se construye un payload que agregue una cláusula `UNION SELECT` de 9 columnas, apuntando a la tabla `Users` en lugar de a la de productos, ubicando `email` y `password` en las dos primeras posiciones y rellenando el resto con valores arbitrarios para no romper la cantidad de columnas del `UNION`:
+
+    `q=x')) UNION SELECT email, password, '3','4','5','6','7','8','9' FROM Users--`
+
+    Al igual que en el paso anterior, este payload se codifica con `Ctrl+U` antes de enviarlo desde Repeater.
+
+
+4. Enviar la petición y verificar en la respuesta `200 OK` que el JSON devuelto ya no contiene únicamente productos, sino que, mezclados con la estructura esperada de un producto, aparecen los correos electrónicos de los usuarios (en el campo `id`) junto con el hash MD5 de su contraseña (en el campo `name`), mientras que el resto de los campos conserva los valores fijos indicados en el `UNION SELECT` (`'3'`, `'4'`, etc.).
+
+   ![UNION SELECT exitoso mostrando credenciales de usuarios](images/image11.png)
+
+   Respuesta conseguida (fragmento):
+
+```json
+{
+  "status":"success",
+  "data":[
+    {
+      "id":"J12934@juice-sh.op",
+      "name":"3c2abc04e4a6ea8f1327d0aae3714b7d",
+      "description":"3",
+      "price":"4",
+      "deluxePrice":"5",
+      "image":"6",
+      "createdAt":"7",
+      "updatedAt":"8",
+      "deletedAt":"9"
+    },
+    {
+      "id":"accountant@juice-sh.op",
+      "name":"963e10f92a70b4b463220cb4c5d636dc",
+      "description":"3",
+      "price":"4",
+      "deluxePrice":"5",
+      "image":"6",
+      "createdAt":"7",
+      "updatedAt":"8",
+      "deletedAt":"9"
+    },
+    {
+      "id":"admin@juice-sh.op",
+      "name":"0192023a7bbd73250516f069df18b500",
+      "description":"3",
+      "price":"4",
+      "deluxePrice":"5",
+      "image":"6",
+      "createdAt":"7",
+      "updatedAt":"8",
+      "deletedAt":"9"
+    },
+    {
+      "id":"amy@juice-sh.op",
+      "name":"030f05e45e30710c3ad3c32f00de0473",
+      "description":"3",
+      "price":"4",
+      "deluxePrice":"5",
+      "image":"6",
+      "createdAt":"7",
+      "updatedAt":"8",
+      "deletedAt":"9"
+    },
+    {
+      "id":"basil@juice-sh.op",
+      "name":"1d75226504523f04d2b239a7fb2990fd",
+      "description":"3",
+      "price":"4",
+      "deluxePrice":"5",
+      "image":"6",
+      "createdAt":"7",
+      "updatedAt":"8",
+      "deletedAt":"9"
+    },
+    ...
+  ]
+}
+
+```
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de esta vulnerabilidad pasa fundamentalmente por reemplazar la construcción de la consulta de búsqueda por consultas parametrizadas, de forma que el valor ingresado en el parámetro `q` sea tratado siempre como un dato y nunca como parte de la sentencia SQL, evitando así que pueda alterar la estructura de la consulta o agregar cláusulas como `UNION SELECT`. Además, conviene validar del lado servidor el formato esperado del término de búsqueda antes de utilizarlo, y evitar exponer en las respuestas de error los detalles internos de la base de datos (como el nombre de las tablas, la cantidad de columnas o el texto completo de la sentencia SQL fallida), ya que esa información es justamente la que permitió inferir la estructura de la consulta y construir el payload de inyección. Por último, dado que en este caso la inyección permitió acceder a contraseñas almacenadas, se recomienda también asegurar que dichas contraseñas se guarden utilizando funciones de hashing robustas y con *salt* (evitando algoritmos débiles como MD5 sin salt), de modo que aun ante una fuga de este tipo el impacto sobre las cuentas de los usuarios se vea reducido.
 
 ---
 </div>
