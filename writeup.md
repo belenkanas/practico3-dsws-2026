@@ -613,22 +613,76 @@ Esta vulnerabilidad comparte la misma causa raíz que J6 (View Basket) en Juice 
 
 ### Descripción
 
-El desafío consiste en forzar el cambio de contraseña de la cuenta de otro usuario, abusando del flujo de recuperación de contraseña.
+El desafío consiste en forzar el cambio de contraseña de la cuenta de otro usuario, abusando del flujo de recuperación de contraseña basado en un código de verificación (OTP) de 4 dígitos.
 
 ### Clasificación OWASP Top 10 API
 
-**API2:2023 – Broken Authentication.** El flujo de recuperación no vincula correctamente el código de verificación (OTP) con el correo electrónico sobre el cual se solicita el cambio, y/o no limita los intentos de verificación de dicho código.
+**API2:2023 – Broken Authentication.** El mecanismo de recuperación de contraseña presenta dos defectos independientes que permiten explotarlo: por un lado, el endpoint de verificación del OTP no ata la validación a la sesión o flujo del navegador que lo generó; por otro, una versión anterior de ese mismo endpoint, mantenida activa por compatibilidad, carece de límite de intentos, permitiendo obtener el OTP correcto por fuerza bruta sin necesidad de tener acceso al correo de la víctima.
 
 ### Enfoque de explotación
 
-1. Disparar el flujo de "Forgot Password" dos veces desde Burp: una con el correo propio y otra con el correo de la víctima, comparando ambas peticiones.
-2. Analizar cómo se relacionan, en el cuerpo de la petición de confirmación, el campo del correo electrónico y el del OTP recibido.
-3. Ajustar la petición de confirmación de cambio de contraseña para que el campo de correo corresponda al de la víctima, aprovechando la falla identificada en la verificación del OTP.
-4. Reenviar la petición y confirmar el cambio iniciando sesión con la nueva contraseña sobre la cuenta de la víctima.
+Se utilizan dos cuentas de prueba: la usada en desafíos anteriores y una segunda que simula la cuenta víctima.
+
+```json
+{
+  "email": "pruebac1@cr.api",
+  "password": "Hola2415!!"
+}
+```
+```json
+{
+  "email": "pruebac2@cr.api",
+  "password": "Chau2415!!"
+}
+```
+
+**Hallazgo 1 — Falta de *binding* entre el OTP y la sesión que lo solicitó**
+
+1. Disparar el flujo de "Forgot Password" desde la interfaz con el correo `pruebac1@cr.api`, generando la petición `POST /identity/api/auth/forget-password`.
+
+   ![Peticion prueba1](images/image29.png)
+
+2. Desde Repeater, modificar el campo `email` de esa misma petición para dispararla también con `pruebac2@cr.api`, generando un segundo OTP independiente enviado al correo de la cuenta víctima.
+
+   ![Peticion prueba2](images/image30.png)
+
+3. Intentar completar el reseteo desde la propia interfaz web usando el OTP recibido por `pruebac2` (`4160`). La operación falla con el mensaje *"Invalid OTP! Please try again"*, porque el formulario web mantiene internamente el correo con el que se inició el flujo (`pruebac1`) y lo envía automáticamente en la petición de confirmación (`POST /identity/api/auth/v3/check-otp`), sin que el usuario pueda verlo ni modificarlo desde la interfaz.
+
+   ![OTP](images/image31.png)
+
+4. Interceptar esa petición con Burp y, desde Repeater, modificar manualmente el campo `email` del cuerpo JSON a `pruebac2@cr.api`, dejando intacto el OTP (`4160`) y la nueva contraseña. Esto demuestra que el endpoint `check-otp` no valida que la petición provenga de la misma sesión o flujo del navegador que originalmente solicitó ese OTP: simplemente verifica si la combinación `email` + `otp` es válida en la base de datos.
+
+   ![Cambio exitoso](images/image32.png)
+
+   La respuesta `200 OK` con el mensaje `"OTP verified"` confirma que la contraseña de la cuenta víctima fue modificada.
+
+5. Confirmar el compromiso iniciando sesión con `pruebac2@cr.api` y la nueva contraseña.
+
+   ![Ingreso](images/image33.png)
+
+   > **Aclaración:** en este ejercicio ambas cuentas son controladas por la misma persona, por lo que el acceso al OTP de la "víctima" vía MailHog no representa, por sí mismo, una falla explotable por un atacante externo. Lo que sí queda demostrado es que el servidor no ata la verificación del OTP a la sesión que lo solicitó, permitiendo completar el reseteo para cualquier correo mediante una llamada directa a la API en tanto se disponga de un OTP válido para esa cuenta.
+
+**Hallazgo 2 — Falta de límite de intentos en una versión anterior del endpoint**
+
+El punto anterior deja abierta una pregunta: ¿cómo obtendría un atacante real el OTP de la víctima, sin acceso a su correo? La respuesta es que no necesita adivinarlo por otros medios: puede obtenerlo por fuerza bruta, ya que una versión anterior del endpoint de verificación no tiene protección contra intentos repetidos.
+
+6. Disparar nuevamente "Forgot Password" para `pruebac2@cr.api`, generando un nuevo OTP que, a los fines de esta prueba, no se consulta en MailHog.
+
+7. Enviar repetidamente a `POST /identity/api/auth/v3/check-otp` un body con un OTP incorrecto (`{"email":"pruebac2@cr.api","otp":"0000","password":"NuevaClave123!"}`). Tras algunos intentos, el servidor responde con un error de límite excedido en lugar de `"Invalid OTP"`, confirmando que la versión `v3` sí implementa *rate limiting*.
+
+8. Repetir el mismo body contra `POST /identity/api/auth/v2/check-otp` (misma ruta, cambiando solo la versión). A diferencia de `v3`, esta versión no bloquea los intentos repetidos, sin importar cuántos se envíen.
+
+9. Enviar esa petición a Burp Intruder, marcando el OTP como posición de ataque (`"otp":"§0000§"`), ataque tipo **Sniper** y un payload numérico de `0000` a `9999` (con relleno de ceros a la izquierda).
+
+10. Iniciar el ataque y ordenar los resultados por longitud de respuesta (columna *Length*): la única fila cuya respuesta difiere del resto (mensaje `"OTP verified"` en lugar del error de OTP inválido) corresponde al código correcto.
+
+11. Confirmar el compromiso iniciando sesión con `pruebac2@cr.api` y la nueva contraseña forzada por este método.
+
+   > **Aclaración:** a diferencia del Hallazgo 1, este método no requiere en ningún momento consultar el correo de la víctima, por lo que sí es representativo de un ataque ejecutable por un tercero externo sin ningún tipo de acceso previo a la cuenta objetivo, más allá de conocer su dirección de correo.
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de esta vulnerabilidad requiere atender ambos defectos de forma independiente. Para el primero, el servidor debería vincular cada OTP emitido a la sesión, cookie o token temporal que inició el flujo de recuperación, de modo que un OTP válido para una cuenta no pueda utilizarse en una petición de confirmación que especifique un correo distinto al que originó esa solicitud. Para el segundo, es fundamental retirar de producción las versiones antiguas de la API una vez que sus reemplazos entran en vigencia, o al menos garantizar que todas las versiones activas de un mismo endpoint reciban las mismas medidas de seguridad; en particular, el endpoint de verificación de OTP debería limitar la cantidad de intentos fallidos por cuenta en una ventana de tiempo (o bloquear la cuenta temporalmente tras varios intentos), independientemente de la versión de API utilizada para acceder a él. De forma más general, conviene además usar OTP de mayor longitud o con mayor entropía, y hacerlos expirar rápidamente, de modo que aun sin límite de intentos la ventana de explotación por fuerza bruta sea mínima.
 
 ---
 </div>
