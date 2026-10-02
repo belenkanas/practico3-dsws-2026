@@ -664,19 +664,29 @@ Se utilizan dos cuentas de prueba: la usada en desafíos anteriores y una segund
 
 **Hallazgo 2 — Falta de límite de intentos en una versión anterior del endpoint**
 
-El punto anterior deja abierta una pregunta: ¿cómo obtendría un atacante real el OTP de la víctima, sin acceso a su correo? La respuesta es que no necesita adivinarlo por otros medios: puede obtenerlo por fuerza bruta, ya que una versión anterior del endpoint de verificación no tiene protección contra intentos repetidos.
+Frente al punto anterior se observa una vulnerabilidad puntual: ¿cómo obtendría un atacante real el OTP de la víctima, sin acceso a su correo? La respuesta es que no necesita adivinarlo por otros medios; puede obtenerlo por fuerza bruta, ya que una versión anterior del endpoint de verificación no tiene protección contra intentos repetidos.
 
 6. Disparar nuevamente "Forgot Password" para `pruebac2@cr.api`, generando un nuevo OTP que, a los fines de esta prueba, no se consulta en MailHog.
 
-7. Enviar repetidamente a `POST /identity/api/auth/v3/check-otp` un body con un OTP incorrecto (`{"email":"pruebac2@cr.api","otp":"0000","password":"NuevaClave123!"}`). Tras algunos intentos, el servidor responde con un error de límite excedido en lugar de `"Invalid OTP"`, confirmando que la versión `v3` sí implementa *rate limiting*.
+7. Enviar repetidamente a `POST /identity/api/auth/v3/check-otp` un body con un OTP incorrecto (`{"email":"pruebac2@cr.api","otp":"0000","password":"NuevaClave123!"}`). Tras algunos intentos, el servidor responde con un error de límite excedido (`"You've exceeded the number of attemps."`) en lugar de `"Invalid OTP"`, confirmando que la versión `v3` sí implementa *rate limiting*.
+
+  ![Rate limiting](images/image34.png)
 
 8. Repetir el mismo body contra `POST /identity/api/auth/v2/check-otp` (misma ruta, cambiando solo la versión). A diferencia de `v3`, esta versión no bloquea los intentos repetidos, sin importar cuántos se envíen.
 
-9. Enviar esa petición a Burp Intruder, marcando el OTP como posición de ataque (`"otp":"§0000§"`), ataque tipo **Sniper** y un payload numérico de `0000` a `9999` (con relleno de ceros a la izquierda).
+9. Enviar esa petición a Burp Intruder (`Ctrl + I`), marcando el OTP como posición de ataque (`"otp":"§0000§"`), ataque tipo **Sniper** y un payload numérico (`Payload type: Numbers`) de `0000` a `9999` (con relleno de ceros a la izquierda).
+
+  ![Sniper attack](images/image35.png)
 
 10. Iniciar el ataque y ordenar los resultados por longitud de respuesta (columna *Length*): la única fila cuya respuesta difiere del resto (mensaje `"OTP verified"` en lugar del error de OTP inválido) corresponde al código correcto.
 
+  ![Length](images/image36.png)
+
+  Para este caso, el OTP correcto era `5566`. Esto se pudo observar debido a que el mensaje de error tiene una logitud de 572 caracteres, mientras que la de éxito tiene 553.
+
 11. Confirmar el compromiso iniciando sesión con `pruebac2@cr.api` y la nueva contraseña forzada por este método.
+  
+  ![Explotacion exitosa](images/image37.png)
 
    > **Aclaración:** a diferencia del Hallazgo 1, este método no requiere en ningún momento consultar el correo de la víctima, por lo que sí es representativo de un ataque ejecutable por un tercero externo sin ningún tipo de acceso previo a la cuenta objetivo, más allá de conocer su dirección de correo.
 
