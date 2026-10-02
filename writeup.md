@@ -705,22 +705,78 @@ La corrección de esta vulnerabilidad requiere atender ambos defectos de forma i
 
 ### Descripción
 
-El desafío consiste en obtener un reembolso o crédito superior al monto realmente abonado al procesar la devolución de un producto.
+El desafío consiste en obtener un producto sin costo real: comprarlo, "devolverlo" únicamente a nivel de API (sin generar ni presentar el código QR que exige el proceso real de devolución) y recibir igualmente el reembolso correspondiente, quedándose tanto con el producto como con el dinero.
 
 ### Clasificación OWASP Top 10 API
 
-**API6:2023 – Unrestricted Access to Sensitive Business Flows.** El flujo de devolución/reembolso no valida límites de cantidad ni impide que una misma operación se repita para la misma orden.
+**API3:2023 – Broken Object Property Level Authorization**, en su variante de *Mass Assignment* (categoría que en la edición 2019 del OWASP API Security Top 10 figuraba de forma independiente como `API6:2019 – Mass Assignment`, y que en la edición 2023 fue fusionada junto con la exposición excesiva de datos dentro de esta categoría más amplia). El endpoint que gestiona el detalle de una orden acepta el método `PUT` y permite que el cliente modifique directamente la propiedad `status` del objeto orden, sin restringir qué transiciones de estado son legítimas ni exigir que ese cambio sea consecuencia de un proceso interno verificado (la inspección física de la devolución), en lugar de una simple petición HTTP del usuario.
 
 ### Enfoque de explotación
 
-1. Realizar una compra y capturar con Burp la petición `POST` correspondiente al flujo de devolución de dicho producto.
-2. Analizar los parámetros de cantidad y monto presentes en el cuerpo de la petición.
-3. Reenviar la misma petición en repetidas ocasiones (*replay*) y/o alterar el valor de cantidad, observando si el sistema acumula reembolsos sin control.
-4. Verificar en el saldo o cupón de la cuenta que el monto obtenido supera al efectivamente pagado.
+1. Realizar una compra desde la sección **Shop** de crAPI y capturar con Burp la petición `POST` correspondiente, para analizar los parámetros de producto y cantidad en su cuerpo, así como el saldo resultante en la respuesta.
+
+   > **Anotación:** el saldo inicial de la cuenta es de $100.
+
+   En este caso se simuló la compra del producto `Wheel`, de $10.00. El endpoint de la compra es `POST /workshop/api/shop/orders`, con el siguiente cuerpo:
+
+```json
+   {
+     "product_id": 2,
+     "quantity": 1
+   }
+```
+
+   La respuesta confirma la operación y el nuevo saldo:
+
+```json
+   {
+     "id": 35,
+     "message": "Order sent successfully.",
+     "credit": 90.0
+   }
+```
+
+   ![Detalle compra](images/image38.png)
+
+2. Desde **Past Orders** (sección donde se listan las órdenes pasadas), abrir el detalle de la orden recién creada. Esto dispara `GET /workshop/api/shop/orders/<orderId>`, donde `<orderId>` es el ID numérico de la orden (en este caso, `35`). En la respuesta, el campo `status` figura como `"delivered"`.
+
+   ![Order 35](images/image39.png)
+
+3. Enviar esa petición a **Repeater** y cambiar el método de `GET` a `PUT` sobre la misma URL (`/workshop/api/shop/orders/<orderId>`), dejando el body vacío o con un valor inválido en `status` a propósito, para forzar un mensaje de error.
+
+   El servidor devuelve un mensaje de validación que revela explícitamente los valores permitidos para ese campo (`delivered`, `return pending`, `returned`), confirmando así que el endpoint acepta `PUT` y que `status` es un campo editable por el cliente, cuando en una implementación correcta este cambio debería ser consecuencia de un proceso interno (la verificación física de la devolución) y no de una petición directa del usuario.
+
+   ![status](images/image40.png)
+
+4. Con esa información, armar la petición definitiva:
+
+```
+   PUT /workshop/api/shop/orders/<orderId>
+```
+```json
+   {
+     "status": "returned"
+   }
+```
+   Con esto se salta directamente al estado final (`returned`), sin pasar por `return pending` ni por ningún paso intermedio de verificación.
+
+5. Enviar la petición y confirmar en la respuesta (`200 OK`) que el `status` de la orden quedó efectivamente en `"returned"`.
+
+   ![Response](images/image41.png)
+
+6. Verificar en la sección **Shop** que el saldo volvió a subir en el monto del producto comprado ($10, pasando de $90 nuevamente a $100), es decir, se reembolsó el dinero sin que se haya generado ni presentado en ningún momento el código QR que exige el proceso legítimo de devolución, y sin haber entregado el producto físicamente.
+
+   ![SHOP](images/image42.png)
+
+   ![Returned](images/image43.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de esta vulnerabilidad requiere, en primer lugar, que el campo `status` de una orden deje de ser una propiedad editable directamente por el cliente a través del endpoint `PUT /workshop/api/shop/orders/<orderId>`; en su lugar, el backend debería definir explícitamente qué campos puede modificar un usuario autenticado (por ejemplo, iniciar una solicitud de devolución) y cuáles son de uso exclusivamente interno (como el estado final `returned`, que solo debería poder fijar un proceso o un rol administrativo tras verificar la devolución física), descartando cualquier intento del cliente de escribir sobre estos últimos en lugar de aceptarlos sin más. Esta distinción es la medida central porque ataca directamente la causa raíz del mass assignment: el problema no es que exista un campo `status`, sino que el servidor confía en que cualquier valor recibido en el cuerpo de la petición es legítimo, sin importar quién lo envía. 
+
+Además, conviene modelar explícitamente la máquina de estados del proceso de devolución (`delivered` --> `return pending` --> `returned`) y validar del lado servidor que una orden solo pueda transicionar entre estados consecutivos y en el orden correcto, de forma que no sea posible saltar directamente de `delivered` a `returned` sin pasar por `return pending` ni por la verificación asociada. Esto es relevante incluso si se restringe qué campos puede tocar el cliente, porque sin esta validación de flujo alguien con permisos legítimos para solicitar una devolución (algo normal) igual podría intentar forzar el estado final sin que medie ninguna inspección real del producto. 
+
+Por último, es recomendable evitar que mensajes de error expongan los valores internos permitidos para un campo sensible (como ocurrió al enviar un `status` inválido), ya que esa información, aunque secundaria, facilitó precisamente el descubrimiento de los estados válidos y aceleró la explotación de la falla principal.
 
 ---
 </div>
@@ -741,10 +797,31 @@ El desafío consiste en obtener cupones de descuento válidos sin conocer un có
 
 ### Enfoque de explotación
 
-1. Interceptar con Burp la petición que aplica un cupón durante el checkout de crAPI.
-2. Probar primero con el código indicado por la consigna, `1893Carbonero First`, para confirmar el comportamiento normal ante un cupón inexistente.
-3. Reemplazar el valor del campo del código de cupón por un objeto u operador de inyección NoSQL (por ejemplo, forzando una condición que la base de datos evalúe siempre como verdadera) en lugar de una cadena literal.
-4. Reenviar la petición y verificar que el cupón es aceptado como válido sin necesidad de conocer un código real.
+1. Desde la sección **Shop** de crAPI, ir a la opción de aplicar un cupón ("Add Coupon") e ingresar cualquier código de prueba (por ejemplo, unos caracteres al azar) para interceptar con Burp la petición que dispara la validación. El endpoint identificado es `POST /community/api/v2/coupon/validate-coupon`, con un cuerpo de la forma:
+
+   ```json
+   {
+     "coupon_code": "ABC123"
+   }
+   ```
+
+   Enviar esta petición a Repeater.
+
+2. Confirmar el comportamiento normal: al enviar un código inexistente como cadena de texto, el servidor responde con un mensaje indicando que el cupón es inválido (por ejemplo, `"Invalid Coupon Code"`), confirmando que, en condiciones normales, hace falta conocer un código real y existente en la base de datos.
+
+3. En lugar de enviar una cadena de texto en `coupon_code`, reemplazar su valor por un objeto con un operador de MongoDB, que es lo que efectivamente recibe la consulta sin que el backend valide que el tipo de dato sea el esperado (un string). El payload utilizado es:
+
+   ```json
+   {
+     "coupon_code": { "$ne": "" }
+   }
+   ```
+
+   El operador `$ne` (*not equal*) le indica a MongoDB que traiga cualquier documento cuyo campo `coupon_code` sea distinto de una cadena vacía, es decir, prácticamente cualquier cupón existente en la colección, sin necesidad de indicar ninguno en particular.
+
+4. Enviar la petición modificada y verificar que la respuesta ya no indica un error de cupón inválido, sino un `200 OK` confirmando que el cupón fue validado correctamente (mensaje del estilo `"Coupon applied"`), junto con los datos del cupón real que la inyección trajo de la base de datos (código y/o monto de descuento).
+
+5. Aplicar dicho cupón en el checkout de la tienda y confirmar que el descuento se refleja efectivamente en el monto a pagar, demostrando el impacto completo de la vulnerabilidad.
 
 ### Recomendaciones
 
