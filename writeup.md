@@ -807,9 +807,11 @@ El desafío consiste en obtener cupones de descuento válidos sin conocer un có
 
    Enviar esta petición a Repeater.
 
-2. Confirmar el comportamiento normal: al enviar un código inexistente como cadena de texto, el servidor responde con un mensaje indicando que el cupón es inválido (por ejemplo, `"Invalid Coupon Code"`), confirmando que, en condiciones normales, hace falta conocer un código real y existente en la base de datos.
+  Al enviar un código inexistente como cadena de texto, el servidor responde con un mensaje indicando que el cupón es inválido (`"Invalid Coupon Code"`), confirmando que, en condiciones normales, hace falta conocer un código real y existente en la base de datos.
 
-3. En lugar de enviar una cadena de texto en `coupon_code`, reemplazar su valor por un objeto con un operador de MongoDB, que es lo que efectivamente recibe la consulta sin que el backend valide que el tipo de dato sea el esperado (un string). El payload utilizado es:
+  ![Invalid Coupon](images/image44.png)
+  
+2. En lugar de enviar una cadena de texto en `coupon_code`, reemplazar su valor por un objeto con un operador de MongoDB, que es lo que efectivamente recibe la consulta sin que el backend valide que el tipo de dato sea el esperado (un string). El payload utilizado es:
 
    ```json
    {
@@ -819,13 +821,33 @@ El desafío consiste en obtener cupones de descuento válidos sin conocer un có
 
    El operador `$ne` (*not equal*) le indica a MongoDB que traiga cualquier documento cuyo campo `coupon_code` sea distinto de una cadena vacía, es decir, prácticamente cualquier cupón existente en la colección, sin necesidad de indicar ninguno en particular.
 
-4. Enviar la petición modificada y verificar que la respuesta ya no indica un error de cupón inválido, sino un `200 OK` confirmando que el cupón fue validado correctamente (mensaje del estilo `"Coupon applied"`), junto con los datos del cupón real que la inyección trajo de la base de datos (código y/o monto de descuento).
+3. Enviar la petición modificada y verificar que la respuesta ya no indica un error de cupón inválido, sino un `200 OK` confirmando que el cupón fue validado correctamente, junto con los datos del cupón real que la inyección trajo de la base de datos (código y monto de descuento).
 
-5. Aplicar dicho cupón en el checkout de la tienda y confirmar que el descuento se refleja efectivamente en el monto a pagar, demostrando el impacto completo de la vulnerabilidad.
+  En este caso, la información brindada fue:
+
+  ```json
+  {
+    "coupon_code": "TRAC075"
+  }
+  ```
+
+  ![Cupon](images/image45.png)
+
+4. Aplicar dicho cupón en el checkout de la tienda y confirmar que el descuento se refleja efectivamente en el monto a pagar, demostrando el impacto completo de la vulnerabilidad.
+
+  ![Cupon aplicado](images/image46.png)
+
+  Como se puede observar, el resultado de aplicar el cupón genera una suma de $75 al saldo disponible del usuario.
+
+  ![Monto](images/image47.png)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección de fondo de esta vulnerabilidad consiste en validar y forzar el tipo de dato del campo `coupon_code` del lado servidor antes de usarlo en cualquier consulta, rechazando la petición (por ejemplo, con un `400 Bad Request`) si el valor recibido no es una cadena de texto simple; esta medida ataca directamente la causa raíz, ya que todo el ataque fue posible porque el backend aceptó sin cuestionar un objeto JSON (`{ "$ne": "" }`) en un campo que debía ser un string, permitiendo que ese objeto se interpretara como un operador de consulta de MongoDB en lugar de como un valor literal a comparar. 
+
+A esto conviene sumar el uso de un esquema de validación de entrada que defina explícitamente la forma esperada del cuerpo de la petición para este endpoint, de modo que cualquier estructura que no coincida sea descartada antes de llegar a la capa de acceso a datos. También es recomendable evitar construir la consulta a MongoDB pasando directamente el valor recibido del cliente como parte del filtro (`bson.M{"coupon_code": coupon_code}` con el dato crudo), y en su lugar sanitizar o escapar cualquier clave que comience con `$` o contenga un punto (`.`), ya que esos caracteres son los que MongoDB interpreta como operadores u operaciones sobre subdocumentos. 
+
+Finalmente, conviene aplicar el principio de mínimo privilegio sobre la validación de cupones en sí: dado que el payload utilizado devolvió un cupón real y válido aun sin conocer su código, el diseño debería evitar que una simple validación exponga los datos completos del cupón (código y monto) en la respuesta, y en su lugar limitarse a confirmar si el cupón ingresado específicamente es válido o no, sin revelar información adicional que no fue solicitada por quien hace la consulta.
 
 ---
 </div>
