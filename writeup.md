@@ -860,22 +860,74 @@ Finalmente, conviene aplicar el principio de mínimo privilegio sobre la validac
 
 ### Descripción
 
-El desafío consiste en provocar una denegación de servicio de capa 7 (aplicación) utilizando la funcionalidad de "contact mechanic".
+El desafío consiste en provocar una denegación de servicio de capa 7 (aplicación) utilizando la funcionalidad de "contact mechanic" de crAPI, que permite reportar un problema con el vehículo a un mecánico y configura reintentos automáticos en caso de fallo.
 
 ### Clasificación OWASP Top 10 API
 
-**API4:2023 – Unrestricted Resource Consumption.** El endpoint que procesa el mensaje al mecánico no implementa límites de frecuencia (*rate limiting*) ni de tamaño de payload, y dispara una operación costosa en el backend en cada invocación.
+**API4:2023 – Unrestricted Resource Consumption.** El endpoint `POST /workshop/api/merchant/contact_mechanic` acepta del cliente dos parámetros, `repeat_request_if_failed` y `number_of_repeats`, que controlan cuántas veces el servidor reintenta sincrónicamente una operación cuando esta falla, sin imponer ningún límite superior sobre la cantidad de reintentos ni procesarlos de forma asíncrona. Esto permite que un único cliente, con una sola petición HTTP, obligue al servidor a consumir una cantidad arbitraria de tiempo de procesamiento, degradando la disponibilidad del servicio para el resto de los usuarios.
 
 ### Enfoque de explotación
 
-1. Capturar con Burp la petición `POST` correspondiente al envío de un mensaje de contacto al mecánico.
-2. Identificar si el cuerpo de la petición admite payloads de gran tamaño (por ejemplo, un campo de texto sin límite definido) y si existe algún control de frecuencia de envíos.
-3. Automatizar el reenvío masivo de dicha petición, eventualmente con payloads de gran tamaño, utilizando herramientas como Burp Intruder o un script propio.
-4. Monitorear el estado del servicio (tiempos de respuesta, disponibilidad, uso de recursos) para verificar la degradación o caída provocada.
+1. Desde el *Dashboard* de crAPI, completar el formulario **Contact Mechanic** una vez con datos válidos, para interceptar con Burp la petición que dispara y conocer su estructura. El endpoint es `POST /workshop/api/merchant/contact_mechanic`, con un cuerpo de la forma:
+
+```json
+   {
+    "mechanic_code":"TRAC_JHN",
+    "problem_details":"Rueda pinchada",
+    "vin":"A443EP1392B76L52P",
+    "mechanic_api":"http://localhost:8888/workshop/api/mechanic/receive_report",
+    "repeat_request_if_failed":false,
+    "number_of_repeats":1
+  }
+```
+  La respuesta (`200 OK`) confirma que el reporte fue enviado correctamente al mecánico. Esta petición se envía a Repeater.
+
+   ![Campos](images/image48.png)
+
+2. Analizar los campos del body: `repeat_request_if_failed` controla si el servidor debe reintentar automáticamente la notificación al mecánico cuando esta falla, y `number_of_repeats` indica cuántas veces reintentar. En la petición original, `repeat_request_if_failed` está en `false`, por lo que no hay reintentos. Ninguno de estos dos valores parece estar validado ni acotado del lado servidor, lo cual los convierte en candidatos para abuso.
+  
+3. Confirmar que es posible provocar una falla controlada en la operación, modificando alternativamente el `vin` por uno inválido (que no corresponda a ningún vehículo registrado) y el `mechanic_api` por una URL inexistente o no respondiente. En ambos casos la petición falla, aunque con distintos códigos de error según la causa (por ejemplo, `500` cuando el VIN no es válido, `404` cuando la URL de destino no existe), confirmando que cualquiera de los dos caminos es apto para generar los fallos que se buscan explotar en el siguiente paso.
+
+  ![VIN incorrecto](images/image49.png)
+
+  ![API incorrecto](images/image50.png)
+
+4. Combinar ambos hallazgos: modificar el cuerpo de la petición para que la operación falle intencionalmente (usando un `vin` inválido) y, al mismo tiempo, habilitar los reintentos fijando un número muy alto de repeticiones:
+
+```json
+   {
+     "mechanic_code":"TRAC_JHN",
+     "problem_details":"Rueda pinchada",
+     "vin":"VIN_INVALIDO_0000",
+     "mechanic_api":"http://localhost:8888/workshop/api/mechanic/receive_report",
+     "repeat_request_if_failed":true,
+     "number_of_repeats":10000
+   }
+```
+
+5. Enviar la petición y observar que, a diferencia de las respuestas anteriores (que llegaron en segundos), esta demora considerablemente más en responder —varios minutos—, evidenciando que el servidor queda procesando internamente los 10.000 reintentos fallidos de forma sincrónica, sin devolver una respuesta inmediata al cliente. Finalmente, responde con un `503 Service Unavailable` y un mensaje que confirma explícitamente el impacto logrado:
+
+```json
+   {
+     "message": "Service unavailable. Seems like you caused layer 7 DoS :)"
+   }
+```
+
+   ![Response](images/image51.png)
+
+6. Como evidencia adicional, mientras la petición del paso 5 seguía pendiente de respuesta, se envió en paralelo una petición simple a otro endpoint de crAPI, confirmando que el servicio también se vio degradado para solicitudes no relacionadas con el ataque, consistente con una denegación de servicio a nivel de aplicación (capa 7) y no solo con un fallo puntual de esa única petición. Esta prueba quedó registrada en video, mostrando la demora anormal en la respuesta de la segunda petición mientras el ataque seguía en curso:
+
+   [Video: degradación del servicio durante el ataque DoS](videos/video1.mp4)
 
 ### Recomendaciones
 
-Algunas recomendaciones para la corrección de dicha vulnerabilidad podría incluir...
+La corrección más directa de esta vulnerabilidad consiste en validar y acotar del lado servidor el valor de `number_of_repeats`, rechazando o recortando a un máximo razonable (por ejemplo, 3 a 5 reintentos) cualquier valor que el cliente envíe por fuera de ese rango; esta medida ataca directamente la causa raíz, ya que todo el ataque depende de poder fijar un número de reintentos arbitrariamente alto sin ningún tipo de tope. 
+
+Sin embargo, acotar el número no es suficiente por sí solo, porque el problema de fondo es que los reintentos se procesan de forma sincrónica dentro del mismo ciclo de vida de la petición HTTP, bloqueando un hilo o worker del servidor mientras duran; por eso, se recomienda además mover el procesamiento de reintentos a un mecanismo asíncrono (una cola de tareas en segundo plano), de forma que la petición original responda de inmediato al cliente (por ejemplo, confirmando que el reporte fue encolado) y los reintentos ocurran fuera del ciclo de request-response, sin consumir un hilo del servidor web por cada uno. 
+
+Adicionalmente, conviene aplicar *rate limiting* específico sobre este endpoint, limitando la cantidad de solicitudes de contacto a mecánico que un mismo usuario puede enviar en una ventana de tiempo determinada, independientemente de que cada petición individual esté bien formada, ya que esto mitiga tanto este ataque puntual como un eventual abuso por volumen de peticiones legítimas repetidas. 
+
+Por último, es recomendable fijar un timeout corto en las llamadas salientes hacia `mechanic_api` y aplicar un patrón de *circuit breaker* que detenga los reintentos tras un número de fallos consecutivos, de forma que una URL de destino lenta o no respondiente no multiplique su costo en tiempo por cada reintento configurado.
 
 ---
 </div>
